@@ -1,681 +1,384 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
-import type {
-  AppState,
-  FastRecord,
-  HunterRank,
-} from './types';
-import {
-  getRankFromLevel,
-  calculateLevelFromXp,
-  getPlantForHours,
-} from './types';
-import {
-  loadState,
-  saveState,
-  derivePlayerStats,
-  calculateFastReward,
-  getTodayKey,
-} from './storage';
-import { sound } from './audio';
-
-// Modern Components
-import { ModernTimer } from './components/ModernTimer';
-import { ModernCropCard } from './components/ModernCropCard';
-import { DashboardWidgets } from './components/DashboardWidgets';
-import { FastingPhasesTimeline } from './components/FastingPhasesTimeline';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { Clock, LayoutDashboard, History, User, Sun, Moon } from 'lucide-react';
+import { dataService } from './lib/dataService';
+import type { AuthUser } from './lib/dataService';
+import type { Fast, Profile, FastStats } from './types';
+import { sound } from './lib/audio';
+import { ToastProvider, useToast } from './components/Toast';
+import { ThemeProvider, useTheme } from './components/ThemeContext';
+import { AuthScreen } from './components/AuthScreen';
+import { DashboardTab } from './components/DashboardTab';
+import { HistoryTab } from './components/HistoryTab';
+import { AccountTab } from './components/AccountTab';
 import { StartFastModal } from './components/StartFastModal';
 import { BreakFastModal } from './components/BreakFastModal';
-import { SystemModal } from './components/SystemModal';
-import { QuestsTab } from './components/QuestsTab';
-import { StatusTab } from './components/StatusTab';
-import { HistoryTab } from './components/HistoryTab';
-import { SettingsModal } from './components/SettingsModal';
-import { PixelConfetti } from './components/PixelConfetti';
+import { EditFastModal } from './components/EditFastModal';
+import './App.css';
 
-// Icons
-import {
-  Sprout,
-  Flame,
-  Settings,
-  Volume2,
-  VolumeX,
-  LayoutDashboard,
-  Award,
-  Shield,
-  BarChart2,
-  CheckCircle,
-} from 'lucide-react';
+function MainApp() {
+  const { theme, setTheme } = useTheme();
+  const { success } = useToast();
 
-type TabType = 'farm' | 'quests' | 'status' | 'history';
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [isInitializing, setIsInitializing] = useState<boolean>(true);
 
-interface Toast {
-  id: number;
-  message: string;
-}
+  // Navegação: 'dashboard' | 'history' | 'account'
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'account'>('dashboard');
 
-export default function App() {
-  const [state, setState] = useState<AppState>(() => loadState());
-  const [activeTab, setActiveTab] = useState<TabType>('farm');
-  const [currentTs, setCurrentTs] = useState<number>(Date.now());
-  const [toast, setToast] = useState<Toast | null>(null);
+  // Estados de Jejum
+  const [activeFast, setActiveFast] = useState<Fast | null>(null);
+  const [historyFasts, setHistoryFasts] = useState<Fast[]>([]);
 
-  // Modals state
-  const [isStartFastOpen, setIsStartFastOpen] = useState(false);
-  const [isEditingStart, setIsEditingStart] = useState(false);
-  const [isBreakFastOpen, setIsBreakFastOpen] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  // Modais
+  const [isStartModalOpen, setIsStartModalOpen] = useState(false);
+  const [isBreakModalOpen, setIsBreakModalOpen] = useState(false);
+  const [editingFast, setEditingFast] = useState<Fast | null>(null);
 
-  // System Level-Up / Rank-Up Modal
-  const [systemModal, setSystemModal] = useState<{
-    isOpen: boolean;
-    newLevel: number;
-    newRank: HunterRank;
-    rankTitle: string;
-    isRankUp: boolean;
-  }>({
-    isOpen: false,
-    newLevel: 1,
-    newRank: 'E',
-    rankTitle: 'Colono Novato',
-    isRankUp: false,
-  });
-
-  const [showConfetti, setShowConfetti] = useState(false);
-  const [claimedQuests, setClaimedQuests] = useState<string[]>([]);
-
-  const showToast = useCallback((message: string) => {
-    const id = Date.now();
-    setToast({ id, message });
-    setTimeout(() => {
-      setToast((prev) => (prev?.id === id ? null : prev));
-    }, 2800);
-  }, []);
-
+  // Carrega a sessão inicial e preferências
   useEffect(() => {
-    sound.setSoundEnabled(state.settings.sound);
-  }, [state.settings.sound]);
+    let isMounted = true;
 
-  // Real-time second clock tick
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setCurrentTs(Date.now());
-    }, 1000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const stats = useMemo(() => derivePlayerStats(state), [state]);
-
-  const elapsedSeconds = useMemo(() => {
-    if (!state.activeFast) return 0;
-    return Math.max(0, Math.floor((currentTs - state.activeFast.startTs) / 1000));
-  }, [state.activeFast, currentTs]);
-
-  const progressPercent = useMemo(() => {
-    if (!state.activeFast) return 0;
-    const goalSecs = state.activeFast.goalHours * 3600;
-    return Math.min(100, Math.floor((elapsedSeconds / goalSecs) * 100));
-  }, [state.activeFast, elapsedSeconds]);
-
-  const elapsedHours = state.activeFast ? elapsedSeconds / 3600 : 0;
-
-  // Time of day detection
-  const timeOfDay = useMemo<'dawn' | 'day' | 'sunset' | 'night'>(() => {
-    if (state.settings.theme !== 'auto') return state.settings.theme;
-    const hour = new Date().getHours();
-    if (hour >= 5 && hour < 7) return 'dawn';
-    if (hour >= 7 && hour < 17) return 'day';
-    if (hour >= 17 && hour < 19.5) return 'sunset';
-    return 'night';
-  }, [state.settings.theme]);
-
-  // Crop stage determination
-  const cropStage = useMemo(() => {
-    if (!state.activeFast) return null;
-    if (progressPercent >= 100) return 'ready';
-    if (progressPercent >= 75) return 'mature';
-    if (progressPercent >= 45) return 'growing';
-    if (progressPercent >= 20) return 'sprout';
-    return 'seed';
-  }, [state.activeFast, progressPercent]);
-
-  const activePlantType = state.activeFast
-    ? getPlantForHours(state.activeFast.goalHours)
-    : null;
-
-  // Check goal reached notification
-  useEffect(() => {
-    if (!state.activeFast) return;
-    const goalSecs = state.activeFast.goalHours * 3600;
-    if (elapsedSeconds >= goalSecs) {
-      const notifiedKey = `notified_goal_${state.activeFast.startTs}`;
-      if (!sessionStorage.getItem(notifiedKey)) {
-        sessionStorage.setItem(notifiedKey, 'true');
-        sound.playHarvest();
-        showToast('🌾 Parabéns! Sua meta foi alcançada e a safra está pronta!');
-        if (state.settings.notifications && 'Notification' in window && Notification.permission === 'granted') {
-          new Notification('Fazenda do Jejum 🌾', {
-            body: `Parabéns! Sua meta de ${state.activeFast.goalHours}h foi alcançada! Sua safra está pronta para colheita!`,
-            icon: '/favicon.svg',
-          });
+    async function initSession() {
+      try {
+        const { user, profile: userProfile } = await dataService.getInitialSession();
+        if (isMounted) {
+          if (user) {
+            setCurrentUser(user);
+            setProfile(userProfile);
+            if (userProfile?.sound_enabled !== undefined) {
+              sound.setEnabled(userProfile.sound_enabled);
+            }
+            if (userProfile?.theme) {
+              setTheme(userProfile.theme);
+            }
+          }
         }
+      } catch {
+        // Ignora
+      } finally {
+        if (isMounted) setIsInitializing(false);
       }
     }
-  }, [state.activeFast, elapsedSeconds, state.settings.notifications, showToast]);
 
-  const updateState = useCallback((updater: (prev: AppState) => AppState) => {
-    setState((prev) => {
-      const next = updater(prev);
-      saveState(next);
-      return next;
-    });
-  }, []);
+    initSession();
+    return () => { isMounted = false; };
+  }, [setTheme]);
 
-  const checkLevelUp = (oldXp: number, newXp: number) => {
-    const oldLvl = calculateLevelFromXp(oldXp);
-    const newLvl = calculateLevelFromXp(newXp);
-
-    if (newLvl.level > oldLvl.level) {
-      const oldRank = getRankFromLevel(oldLvl.level);
-      const newRank = getRankFromLevel(newLvl.level);
-      const isRankUp = newRank.rank !== oldRank.rank;
-
-      setShowConfetti(true);
-      setSystemModal({
-        isOpen: true,
-        newLevel: newLvl.level,
-        newRank: newRank.rank,
-        rankTitle: newRank.title,
-        isRankUp,
-      });
+  // Carrega os jejuns quando o usuário estiver autenticado
+  const refreshFasts = useCallback(async () => {
+    if (!currentUser) return;
+    try {
+      const active = await dataService.getActiveFast(currentUser.id);
+      const history = await dataService.getHistory(currentUser.id);
+      setActiveFast(active);
+      setHistoryFasts(history);
+    } catch {
+      // Ignora erro temporário de sync
     }
-  };
+  }, [currentUser]);
 
-  const handleStartFast = (startTs: number, goalHours: number) => {
-    updateState((prev) => ({
-      ...prev,
-      activeFast: { startTs, goalHours },
-      settings: { ...prev.settings, lastGoal: goalHours },
-    }));
-    showToast(`🌱 Jejum de ${goalHours}h iniciado com sucesso!`);
-  };
-
-  const handleBreakFast = (adjustedEndTs: number) => {
-    if (!state.activeFast) return;
-
-    const durationMinutes = Math.max(1, Math.floor((adjustedEndTs - state.activeFast.startTs) / (1000 * 60)));
-    const reward = calculateFastReward(durationMinutes, state.activeFast.goalHours, stats.streak);
-
-    const newRecord: FastRecord = {
-      id: 'fast_' + Date.now(),
-      startTs: state.activeFast.startTs,
-      endTs: adjustedEndTs,
-      goalHours: state.activeFast.goalHours,
-      durationMinutes,
-      completedGoal: reward.completedGoal,
-      xpEarned: reward.xpEarned,
-      plant: getPlantForHours(state.activeFast.goalHours),
-      harvestQuality: reward.harvestQuality,
-    };
-
-    const oldTotalXp = stats.totalXp;
-    const newTotalXp = oldTotalXp + reward.xpEarned;
-
-    updateState((prev) => ({
-      ...prev,
-      activeFast: null,
-      history: [...prev.history, newRecord],
-    }));
-
-    setIsBreakFastOpen(false);
-    setShowConfetti(true);
-    sound.playHarvest();
-    showToast(`🌾 Safra colhida! +${reward.xpEarned} XP conquistados`);
-
-    checkLevelUp(oldTotalXp, newTotalXp);
-  };
-
-  const handleAddWater = (delta: number) => {
-    const todayKey = getTodayKey();
-    updateState((prev) => {
-      const current = Math.max(0, prev.water[todayKey] || 0);
-      const next = Math.max(0, current + delta);
-      return {
-        ...prev,
-        water: { ...prev.water, [todayKey]: next },
-      };
-    });
-    if (delta > 0) {
-      showToast('💧 +250 ml de água registrados!');
+  useEffect(() => {
+    if (currentUser) {
+      refreshFasts();
     }
-  };
+  }, [currentUser, refreshFasts]);
 
-  const handleClaimQuestXp = (questId: string, xp: number) => {
-    if (claimedQuests.includes(questId)) return;
+  // Cálculo de estatísticas consolidadas
+  const stats: FastStats = useMemo(() => {
+    const completed = historyFasts.filter(f => f.ended_at !== null);
+    let totalHours = 0;
+    let longestHours = 0;
+    let metGoalsCount = 0;
 
-    const oldTotalXp = stats.totalXp;
-    const newTotalXp = oldTotalXp + xp;
+    completed.forEach(f => {
+      const durH = (new Date(f.ended_at!).getTime() - new Date(f.started_at).getTime()) / 3600000;
+      totalHours += durH;
+      if (durH > longestHours) longestHours = durH;
+      if (durH >= f.goal_hours) metGoalsCount++;
+    });
 
-    setClaimedQuests((prev) => [...prev, questId]);
-    setShowConfetti(true);
+    const goalSuccessRate = completed.length > 0 ? Math.round((metGoalsCount / completed.length) * 100) : 100;
+    const averageFastHours = completed.length > 0 ? totalHours / completed.length : 0;
 
-    const questRecord: FastRecord = {
-      id: 'quest_' + Date.now(),
-      startTs: Date.now(),
-      endTs: Date.now(),
-      goalHours: 0,
-      durationMinutes: 0,
-      completedGoal: true,
-      xpEarned: xp,
-      plant: 'carrot',
-      harvestQuality: 'perfect',
+    // Cálculo simplificado de sequência (streak) em dias
+    let streak = 0;
+    if (completed.length > 0) {
+      const sorted = [...completed].sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime());
+      // Se jejuou hoje ou ontem, conta como streak ativo
+      const diffDays = Math.floor((new Date().getTime() - new Date(sorted[0].started_at).getTime()) / 86400000);
+      if (diffDays <= 1 || activeFast) {
+        streak = Math.min(completed.length, diffDays + 1);
+      }
+    } else if (activeFast) {
+      streak = 1;
+    }
+
+    return {
+      totalFasts: completed.length + (activeFast ? 1 : 0),
+      completedFasts: completed.length,
+      totalHoursFasted: totalHours,
+      longestFastHours: longestHours,
+      goalSuccessRate,
+      currentStreakDays: streak,
+      averageFastHours
     };
+  }, [historyFasts, activeFast]);
 
-    updateState((prev) => ({
-      ...prev,
-      history: [...prev.history, questRecord],
-    }));
-
-    showToast(`✨ Recompensa de missão: +${xp} XP!`);
-    checkLevelUp(oldTotalXp, newTotalXp);
+  // Ações de Jejum
+  const handleStartFast = async (startedAt: string, goalHours: number, notes?: string) => {
+    if (!currentUser) return;
+    const newFast = await dataService.startFast(currentUser.id, startedAt, goalHours, notes);
+    setActiveFast(newFast);
+    success('Jejum iniciado!', `Meta estipulada em ${goalHours} horas.`);
+    await refreshFasts();
   };
 
-  const todayKey = getTodayKey();
-  const todayWaterCups = Math.max(0, state.water[todayKey] || 0);
+  const handleBreakFast = async (fastId: string, endedAt: string, notes?: string) => {
+    await dataService.breakFast(fastId, endedAt, notes);
+    setActiveFast(null);
+    success('Jejum concluído com sucesso!');
+    await refreshFasts();
+  };
 
-  // Check today's completed fasts
-  const todayFasts = useMemo(() => {
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
-    const startOfDayTs = startOfDay.getTime();
-    return state.history.filter((f) => f.endTs >= startOfDayTs);
-  }, [state.history]);
+  const handleSaveEditFast = async (fastId: string, updates: { started_at: string; ended_at?: string; goal_hours: number; notes?: string }) => {
+    if (activeFast && activeFast.id === fastId) {
+      const updated = await dataService.updateActiveFast(fastId, updates);
+      setActiveFast(updated);
+    } else {
+      await dataService.updatePastFast(fastId, updates);
+    }
+    success('Registro atualizado');
+    await refreshFasts();
+  };
 
-  const hasHitGoalToday = todayFasts.some((f) => f.completedGoal);
+  const handleDeleteFast = async (fastId: string) => {
+    await dataService.deleteFast(fastId);
+    if (activeFast && activeFast.id === fastId) {
+      setActiveFast(null);
+    }
+    success('Registro excluído');
+    await refreshFasts();
+  };
+
+  const handleSignOut = async () => {
+    sound.playClick();
+    await dataService.signOut();
+    setCurrentUser(null);
+    setActiveFast(null);
+    setHistoryFasts([]);
+    success('Sessão encerrada');
+  };
+
+  if (isInitializing) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', color: 'var(--text-muted)', fontSize: '0.9375rem' }}>
+          <Clock size={20} className="animate-spin" />
+          <span>Carregando Controle de Jejum...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return <AuthScreen onAuthSuccess={user => setCurrentUser(user)} />;
+  }
 
   return (
-    <div className="min-h-screen bg-[var(--bg-canvas)] text-[var(--text-primary)] flex flex-col justify-between selection:bg-[var(--accent-sage-subtle)] selection:text-[var(--accent-sage)] font-sans">
-      {/* Toast Alert Feedback */}
-      {toast && (
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+      {/* CABEÇALHO SUPERIOR (HEADER) */}
+      <header
+        style={{
+          borderBottom: '1px solid var(--border-subtle)',
+          backgroundColor: 'var(--bg-surface)',
+          position: 'sticky',
+          top: 0,
+          zIndex: 40
+        }}
+      >
         <div
-          role="status"
-          aria-live="polite"
-          className="fixed top-16 right-5 z-50 bg-[var(--bg-surface-raised)] border border-[var(--border-strong)] text-[var(--text-primary)] py-2.5 px-4 rounded-xl shadow-xl flex items-center gap-2.5 text-xs font-medium animate-fadeIn"
+          style={{
+            maxWidth: '1100px',
+            margin: '0 auto',
+            padding: '0.75rem 1rem',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between'
+          }}
         >
-          <CheckCircle className="w-4 h-4 text-[var(--accent-sage)] flex-shrink-0" />
-          <span>{toast.message}</span>
-        </div>
-      )}
-
-      {/* Top Navbar */}
-      <header className="sticky top-0 z-30 bg-[var(--bg-surface)]/90 backdrop-blur-md border-b border-[var(--border-subtle)] py-3">
-        <div className="container-xl flex items-center justify-between gap-4">
-          {/* Logo & Platform Name */}
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-[var(--accent-pumpkin-subtle)] border border-[var(--accent-pumpkin-border)] flex items-center justify-center text-[var(--accent-pumpkin)]">
-              <Sprout className="w-5 h-5 stroke-[2.2]" />
+          {/* Logo e Nome da Aplicação */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+            <div
+              style={{
+                width: '32px',
+                height: '32px',
+                borderRadius: 'var(--radius-sm)',
+                backgroundColor: 'var(--emerald-500)',
+                color: '#FFFFFF',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+              }}
+            >
+              <Clock size={18} strokeWidth={2.5} />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <span className="text-base font-bold font-heading tracking-tight text-[var(--text-primary)]">
-                  Fazenda do Jejum
-                </span>
-                <span className="hidden sm:inline-flex text-xs font-semibold px-2 py-0.5 rounded-full border border-[var(--accent-sage-border)] bg-[var(--accent-sage-subtle)] text-[var(--accent-sage)]">
-                  Horta RPG
-                </span>
-              </div>
-              <p className="text-xs text-[var(--text-tertiary)]">
-                Gamificação & Cultivo Intermitente
-              </p>
+              <span style={{ fontSize: '1.0625rem', fontWeight: 800, letterSpacing: '-0.02em', color: 'var(--text-primary)' }}>
+                Controle de Jejum
+              </span>
             </div>
           </div>
 
-          {/* Desktop Navigation Tab Pills */}
-          <nav className="hidden md:flex items-center gap-1 bg-[var(--bg-surface-subtle)] p-1 rounded-xl border border-[var(--border-subtle)]" role="tablist">
+          {/* Navegação por Abas (Desktop) */}
+          <nav className="tabs-container" style={{ display: 'none' }} id="desktop-nav">
             <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === 'farm'}
-              onClick={() => {
-                sound.playClick();
-                setActiveTab('farm');
-              }}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all ${
-                activeTab === 'farm'
-                  ? 'bg-[var(--accent-pumpkin)] text-[#14120D] font-bold shadow-sm'
-                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface-raised)]'
-              }`}
+              className={`tab-btn ${activeTab === 'dashboard' ? 'active' : ''}`}
+              onClick={() => { sound.playClick(); setActiveTab('dashboard'); }}
             >
-              <LayoutDashboard className="w-4 h-4" />
-              <span>Horta & Timer</span>
+              <LayoutDashboard size={15} />
+              <span>Painel</span>
             </button>
-
             <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === 'quests'}
-              onClick={() => {
-                sound.playClick();
-                setActiveTab('quests');
-              }}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all ${
-                activeTab === 'quests'
-                  ? 'bg-[var(--accent-pumpkin)] text-[#14120D] font-bold shadow-sm'
-                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface-raised)]'
-              }`}
+              className={`tab-btn ${activeTab === 'history' ? 'active' : ''}`}
+              onClick={() => { sound.playClick(); setActiveTab('history'); }}
             >
-              <Award className="w-4 h-4" />
-              <span>Missões Diárias</span>
-            </button>
-
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === 'status'}
-              onClick={() => {
-                sound.playClick();
-                setActiveTab('status');
-              }}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all ${
-                activeTab === 'status'
-                  ? 'bg-[var(--accent-pumpkin)] text-[#14120D] font-bold shadow-sm'
-                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface-raised)]'
-              }`}
-            >
-              <Shield className="w-4 h-4" />
-              <span>Status & Ranks</span>
-            </button>
-
-            <button
-              type="button"
-              role="tab"
-              aria-selected={activeTab === 'history'}
-              onClick={() => {
-                sound.playClick();
-                setActiveTab('history');
-              }}
-              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all ${
-                activeTab === 'history'
-                  ? 'bg-[var(--accent-pumpkin)] text-[#14120D] font-bold shadow-sm'
-                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface-raised)]'
-              }`}
-            >
-              <BarChart2 className="w-4 h-4" />
+              <History size={15} />
               <span>Histórico</span>
+            </button>
+            <button
+              className={`tab-btn ${activeTab === 'account' ? 'active' : ''}`}
+              onClick={() => { sound.playClick(); setActiveTab('account'); }}
+            >
+              <User size={15} />
+              <span>Conta</span>
             </button>
           </nav>
 
-          {/* Right Header Badges & Actions */}
-          <div className="flex items-center gap-2">
-            {/* Streak Badge */}
-            <div
-              className="flex items-center gap-1.5 bg-[var(--accent-pumpkin-subtle)] border border-[var(--accent-pumpkin-border)] px-2.5 py-1 rounded-xl text-[var(--accent-pumpkin)] text-xs font-bold font-mono"
-              title="Sequência de dias com meta concluída"
-            >
-              <Flame className="w-3.5 h-3.5 fill-current" />
-              <span>{stats.streak}d</span>
-            </div>
-
-            {/* Rank / Level Badge */}
-            <div className="hidden sm:flex items-center gap-1.5 bg-[var(--bg-surface-raised)] border border-[var(--border-subtle)] px-2.5 py-1 rounded-xl">
-              <span className="font-mono font-bold text-xs text-[var(--accent-pumpkin)]">
-                {stats.rank}
-              </span>
-              <span className="text-xs font-medium text-[var(--text-secondary)]">
-                Nv. {stats.level}
-              </span>
-            </div>
-
-            {/* Sound Toggle */}
+          {/* Seletor rápido de tema no cabeçalho */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <button
-              type="button"
-              onClick={() => {
-                const next = !state.settings.sound;
-                sound.setSoundEnabled(next);
-                if (next) sound.playClick();
-                updateState((prev) => ({
-                  ...prev,
-                  settings: { ...prev.settings, sound: next },
-                }));
-              }}
-              className="btn-icon"
-              aria-label={state.settings.sound ? 'Silenciar Áudio' : 'Ativar Áudio'}
-              title={state.settings.sound ? 'Silenciar Áudio' : 'Ativar Áudio'}
-            >
-              {state.settings.sound ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
-            </button>
-
-            {/* Settings Modal Toggle */}
-            <button
-              type="button"
+              className="btn btn-ghost"
               onClick={() => {
                 sound.playClick();
-                setIsSettingsOpen(true);
+                setTheme(theme === 'dark' ? 'light' : 'dark');
               }}
-              className="btn-icon"
-              aria-label="Configurações e Sobre"
-              title="Configurações e Sobre"
+              style={{ padding: '0.45rem', borderRadius: '50%' }}
+              title="Alternar tema claro/escuro"
+              aria-label="Alternar tema"
             >
-              <Settings className="w-4 h-4" />
+              {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
             </button>
           </div>
         </div>
       </header>
 
-      {/* Main Dynamic Workspace */}
-      <main className="container-xl py-5 pb-24 md:pb-8 flex-1">
-        {activeTab === 'farm' && (
-          <div className="space-y-6">
-            {/* Asymmetrical Hero Layout: Timer (Clean) + Horta (Living Center) + Side Widgets */}
-            <div className="dashboard-hero-grid">
-              {/* Col 1: Fasting Timer Gauge */}
-              <ModernTimer
-                activeFast={state.activeFast}
-                elapsedSeconds={elapsedSeconds}
-                onStartFastClick={() => {
-                  sound.playClick();
-                  setIsEditingStart(false);
-                  setIsStartFastOpen(true);
-                }}
-                onBreakFastClick={() => {
-                  sound.playClick();
-                  setIsBreakFastOpen(true);
-                }}
-                onEditStartClick={() => {
-                  sound.playClick();
-                  setIsEditingStart(true);
-                  setIsStartFastOpen(true);
-                }}
-                onHarvestClick={() => {
-                  sound.playHarvest();
-                  setIsBreakFastOpen(true);
-                }}
-              />
-
-              {/* Col 2: Virtual Living Garden & Growing Crop (Protagonist) */}
-              <ModernCropCard
-                plantType={activePlantType}
-                stage={cropStage}
-                progressPercent={progressPercent}
-                timeOfDay={timeOfDay}
-                onHarvest={() => {
-                  sound.playHarvest();
-                  setIsBreakFastOpen(true);
-                }}
-                onWaterPlant={() => handleAddWater(1)}
-              />
-
-              {/* Col 3: Side Widgets (Hydration, Rank Bar & Daily Quests Checklist) */}
-              <DashboardWidgets
-                stats={stats}
-                todayWaterCups={todayWaterCups}
-                waterGoal={state.settings.waterGoal}
-                onAddWater={handleAddWater}
-                hasHitGoalToday={hasHitGoalToday}
-                onNavigateQuests={() => setActiveTab('quests')}
-              />
-            </div>
-
-            {/* Metabolic Journey Timeline */}
-            <FastingPhasesTimeline elapsedHours={elapsedHours} />
-          </div>
-        )}
-
-        {activeTab === 'quests' && (
-          <QuestsTab
-            state={state}
-            onAddWater={handleAddWater}
-            onClaimQuestXp={handleClaimQuestXp}
-            claimedQuests={claimedQuests}
+      {/* CONTEÚDO PRINCIPAL */}
+      <main className="app-container" style={{ flex: 1 }}>
+        {activeTab === 'dashboard' && (
+          <DashboardTab
+            activeFast={activeFast}
+            stats={stats}
+            onOpenStartModal={() => setIsStartModalOpen(true)}
+            onOpenBreakModal={() => setIsBreakModalOpen(true)}
+            onOpenEditModal={fast => setEditingFast(fast)}
           />
-        )}
-
-        {activeTab === 'status' && (
-          <StatusTab state={state} stats={stats} />
         )}
 
         {activeTab === 'history' && (
           <HistoryTab
-            state={state}
-            onUpdateHistory={(newHistory) => {
-              updateState((prev) => ({ ...prev, history: newHistory }));
-            }}
-            onRestoreState={(newState) => {
-              setState(newState);
-            }}
-            onResetProgress={() => {
-              localStorage.clear();
-              window.location.reload();
-            }}
+            history={historyFasts}
+            onEditFast={fast => setEditingFast(fast)}
+            onDeleteFast={handleDeleteFast}
+          />
+        )}
+
+        {activeTab === 'account' && (
+          <AccountTab
+            user={currentUser}
+            profile={profile}
+            history={historyFasts}
+            onSignOut={handleSignOut}
+            onRefreshData={refreshFasts}
           />
         )}
       </main>
 
-      {/* Mobile Fixed Bottom Tab Bar (Responsive UX) */}
+      {/* BARRA DE NAVEGAÇÃO INFERIOR FIXA (MOBILE-FIRST) */}
       <nav
-        aria-label="Navegação inferior mobile"
-        className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[var(--bg-surface)]/95 backdrop-blur-md border-t border-[var(--border-subtle)] py-2 px-3 flex justify-around items-center"
+        style={{
+          position: 'fixed',
+          bottom: 0,
+          left: 0,
+          right: 0,
+          backgroundColor: 'var(--bg-surface)',
+          borderTop: '1px solid var(--border-subtle)',
+          display: 'flex',
+          justifyContent: 'space-around',
+          padding: '0.4rem 0.5rem calc(0.4rem + env(safe-area-inset-bottom)) 0.5rem',
+          zIndex: 40
+        }}
       >
         <button
-          type="button"
-          onClick={() => {
-            sound.playClick();
-            setActiveTab('farm');
-          }}
-          className={`flex flex-col items-center justify-center min-h-[44px] min-w-[48px] gap-1 text-xs font-semibold transition-colors ${
-            activeTab === 'farm'
-              ? 'text-[var(--accent-pumpkin)]'
-              : 'text-[var(--text-tertiary)] hover:text-[var(--text-primary)]'
-          }`}
+          className={`tab-btn ${activeTab === 'dashboard' ? 'active' : ''}`}
+          onClick={() => { sound.playClick(); setActiveTab('dashboard'); }}
+          style={{ flexDirection: 'column', gap: '0.2rem', padding: '0.35rem 0.75rem', fontSize: '0.75rem' }}
         >
-          <LayoutDashboard className="w-5 h-5" />
-          <span>Horta</span>
+          <LayoutDashboard size={18} />
+          <span>Painel</span>
         </button>
 
         <button
-          type="button"
-          onClick={() => {
-            sound.playClick();
-            setActiveTab('quests');
-          }}
-          className={`flex flex-col items-center justify-center min-h-[44px] min-w-[48px] gap-1 text-xs font-semibold transition-colors ${
-            activeTab === 'quests'
-              ? 'text-[var(--accent-pumpkin)]'
-              : 'text-[var(--text-tertiary)] hover:text-[var(--text-primary)]'
-          }`}
+          className={`tab-btn ${activeTab === 'history' ? 'active' : ''}`}
+          onClick={() => { sound.playClick(); setActiveTab('history'); }}
+          style={{ flexDirection: 'column', gap: '0.2rem', padding: '0.35rem 0.75rem', fontSize: '0.75rem' }}
         >
-          <Award className="w-5 h-5" />
-          <span>Missões</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            sound.playClick();
-            setActiveTab('status');
-          }}
-          className={`flex flex-col items-center justify-center min-h-[44px] min-w-[48px] gap-1 text-xs font-semibold transition-colors ${
-            activeTab === 'status'
-              ? 'text-[var(--accent-pumpkin)]'
-              : 'text-[var(--text-tertiary)] hover:text-[var(--text-primary)]'
-          }`}
-        >
-          <Shield className="w-5 h-5" />
-          <span>Status</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            sound.playClick();
-            setActiveTab('history');
-          }}
-          className={`flex flex-col items-center justify-center min-h-[44px] min-w-[48px] gap-1 text-xs font-semibold transition-colors ${
-            activeTab === 'history'
-              ? 'text-[var(--accent-pumpkin)]'
-              : 'text-[var(--text-tertiary)] hover:text-[var(--text-primary)]'
-          }`}
-        >
-          <BarChart2 className="w-5 h-5" />
+          <History size={18} />
           <span>Histórico</span>
+        </button>
+
+        <button
+          className={`tab-btn ${activeTab === 'account' ? 'active' : ''}`}
+          onClick={() => { sound.playClick(); setActiveTab('account'); }}
+          style={{ flexDirection: 'column', gap: '0.2rem', padding: '0.35rem 0.75rem', fontSize: '0.75rem' }}
+        >
+          <User size={18} />
+          <span>Conta</span>
         </button>
       </nav>
 
-      {/* Desktop Footer */}
-      <footer className="border-t border-[var(--border-subtle)] bg-[var(--bg-surface)]/80 py-3.5">
-        <div className="container-xl flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-[var(--text-tertiary)]">
-          <div>
-            Fazenda do Jejum • Rastreamento de Jejum Intermitente com Gamificação
-          </div>
-          <div className="flex items-center gap-3">
-            <span>Solo Leveling RPG</span>
-            <span>•</span>
-            <span>Armazenamento Local v2</span>
-          </div>
-        </div>
-      </footer>
-
-      {/* Modals */}
+      {/* MODAIS DO SISTEMA */}
       <StartFastModal
-        isOpen={isStartFastOpen}
-        onClose={() => setIsStartFastOpen(false)}
+        isOpen={isStartModalOpen}
+        onClose={() => setIsStartModalOpen(false)}
         onConfirm={handleStartFast}
-        defaultGoalHours={state.settings.lastGoal || 16}
-        isEditing={isEditingStart}
-        currentStartTs={isEditingStart ? state.activeFast?.startTs : undefined}
+        defaultGoalHours={profile?.preferred_goal_hours || 16}
       />
 
-      {state.activeFast && (
-        <BreakFastModal
-          isOpen={isBreakFastOpen}
-          onClose={() => setIsBreakFastOpen(false)}
-          activeFast={state.activeFast}
-          currentStreak={stats.streak}
-          onConfirmBreak={handleBreakFast}
-        />
-      )}
-
-      <SystemModal
-        isOpen={systemModal.isOpen}
-        onClose={() => setSystemModal((prev) => ({ ...prev, isOpen: false }))}
-        newLevel={systemModal.newLevel}
-        newRank={systemModal.newRank}
-        rankTitle={systemModal.rankTitle}
-        isRankUp={systemModal.isRankUp}
+      <BreakFastModal
+        isOpen={isBreakModalOpen}
+        activeFast={activeFast}
+        onClose={() => setIsBreakModalOpen(false)}
+        onConfirm={handleBreakFast}
       />
 
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        settings={state.settings}
-        onUpdateSettings={(newSettings) => {
-          updateState((prev) => ({ ...prev, settings: newSettings }));
-        }}
-      />
-
-      <PixelConfetti
-        active={showConfetti}
-        onComplete={() => setShowConfetti(false)}
+      <EditFastModal
+        isOpen={Boolean(editingFast)}
+        fast={editingFast}
+        onClose={() => setEditingFast(null)}
+        onSave={handleSaveEditFast}
+        onDelete={handleDeleteFast}
       />
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <ThemeProvider>
+      <ToastProvider>
+        <MainApp />
+      </ToastProvider>
+    </ThemeProvider>
   );
 }

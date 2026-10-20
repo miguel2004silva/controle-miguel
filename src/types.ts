@@ -1,232 +1,106 @@
-// Types for Fazenda do Jejum
-
-export type PlantType = 'carrot' | 'potato' | 'pumpkin' | 'starfruit';
-
-export type GrowthStage = 'seed' | 'sprout' | 'growing' | 'mature' | 'ready' | 'wilted';
-
-export type HunterRank = 'E' | 'D' | 'C' | 'B' | 'A' | 'S';
-
-export interface PlantConfig {
-  type: PlantType;
-  name: string;
-  minHours: number;
-  maxHours: number;
-  description: string;
-  color: string;
-}
-
-export const PLANT_CONFIGS: Record<PlantType, PlantConfig> = {
-  carrot: {
-    type: 'carrot',
-    name: 'Cenoura Silvestre',
-    minHours: 0,
-    maxHours: 14,
-    description: 'Cultivo rápido e nutritivo. Ideal para iniciantes no Vale.',
-    color: '#e67e22',
-  },
-  potato: {
-    type: 'potato',
-    name: 'Batata Rústica',
-    minHours: 14.1,
-    maxHours: 17,
-    description: 'Um clássico robusto. Fortalece a determinação do fazendeiro.',
-    color: '#d4a373',
-  },
-  pumpkin: {
-    type: 'pumpkin',
-    name: 'Abóbora de Ouro',
-    minHours: 17.1,
-    maxHours: 23,
-    description: 'Grande e resistente. Exige disciplina e paciência para maturar.',
-    color: '#d9772b',
-  },
-  starfruit: {
-    type: 'starfruit',
-    name: 'Fruta Estrela Ancestral',
-    minHours: 23.1,
-    maxHours: 999,
-    description: 'Uma relíquia lendária. Requer uma vontade inabalável de jejuar.',
-    color: '#f1c40f',
-  },
-};
-
-export interface ActiveFast {
-  startTs: number;
-  goalHours: number;
-}
-
-export interface FastRecord {
+export interface Fast {
   id: string;
-  startTs: number;
-  endTs: number;
-  goalHours: number;
-  durationMinutes: number;
-  completedGoal: boolean;
-  xpEarned: number;
-  plant: PlantType;
-  harvestQuality: 'perfect' | 'wilted';
+  user_id: string;
+  started_at: string; // ISO 8601 UTC string
+  ended_at: string | null; // ISO 8601 UTC string or null if currently active
+  goal_hours: number; // 1 to 72 hours
+  notes?: string | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
-export interface Achievement {
+export interface Profile {
+  id: string;
+  email: string | null;
+  preferred_goal_hours: number;
+  sound_enabled: boolean;
+  theme: 'system' | 'dark' | 'light';
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface FastingPhase {
   id: string;
   title: string;
-  description: string;
-  icon: string;
-  unlocked: boolean;
+  shortDesc: string;
+  fullDesc: string;
+  startHour: number;
+  endHour: number;
+  badge: string;
 }
 
-export interface Quest {
-  id: string;
-  title: string;
-  description: string;
-  xp: number;
-  current: number;
-  target: number;
-  unit: string;
-  isCompleted: boolean;
-  isWeekly?: boolean;
+export const FASTING_PHASES: FastingPhase[] = [
+  {
+    id: 'glucose',
+    title: 'Estabilização Glicêmica',
+    shortDesc: 'Açúcar no sangue e insulina retornam aos níveis basais.',
+    fullDesc: 'Seu corpo digere a última refeição. A glicose circulante cai e os níveis de insulina diminuem gradativamente.',
+    startHour: 0,
+    endHour: 4,
+    badge: '0h – 4h'
+  },
+  {
+    id: 'glycogen',
+    title: 'Consumo de Glicogênio',
+    shortDesc: 'O fígado queima reservas de glicose para manter a energia.',
+    fullDesc: 'As reservas de glicogênio hepático começam a ser consumidas para abastecer os tecidos essenciais.',
+    startHour: 4,
+    endHour: 8,
+    badge: '4h – 8h'
+  },
+  {
+    id: 'transition',
+    title: 'Transição Cetogênica',
+    shortDesc: 'O metabolismo inicia a transição para queima de gordura.',
+    fullDesc: 'Com o glicogênio em declínio, o corpo passa a mobilizar ácidos graxos como combustível primário.',
+    startHour: 8,
+    endHour: 12,
+    badge: '8h – 12h'
+  },
+  {
+    id: 'ketosis',
+    title: 'Cetose e Queima de Gordura',
+    shortDesc: 'Produção ativa de corpos cetônicos para energia.',
+    fullDesc: 'Taxa máxima de lipólise. Corpos cetônicos fornecem energia para o cérebro, reduzindo a sensação de fome.',
+    startHour: 12,
+    endHour: 16,
+    badge: '12h – 16h'
+  },
+  {
+    id: 'autophagy',
+    title: 'Autofagia Celular',
+    shortDesc: 'Reciclagem e limpeza de proteínas danificadas.',
+    fullDesc: 'Processo natural de regeneração celular (Nobel de Medicina 2016). Células reciclam componentes defeituosos.',
+    startHour: 16,
+    endHour: 24,
+    badge: '16h – 24h'
+  },
+  {
+    id: 'deep_autophagy',
+    title: 'Reparo Imunológico Profundo',
+    shortDesc: 'Renovação do sistema imune e estresse oxidativo mínimo.',
+    fullDesc: 'Diminuição acentuada de marcadores inflamatórios e estímulo à biogênese de novas células saudáveis.',
+    startHour: 24,
+    endHour: 72,
+    badge: '24h+'
+  }
+];
+
+export function getPhaseForHours(hours: number): FastingPhase {
+  if (hours < 4) return FASTING_PHASES[0];
+  if (hours < 8) return FASTING_PHASES[1];
+  if (hours < 12) return FASTING_PHASES[2];
+  if (hours < 16) return FASTING_PHASES[3];
+  if (hours < 24) return FASTING_PHASES[4];
+  return FASTING_PHASES[5];
 }
 
-export interface PlayerDerivedStats {
-  totalXp: number;
-  level: number;
-  currentLevelXp: number;
-  nextLevelXp: number;
-  progressPercent: number;
-  rank: HunterRank;
-  rankTitle: string;
-  streak: number;
-  bestStreak: number;
-  totalFastedHours: number;
+export interface FastStats {
+  totalFasts: number;
+  completedFasts: number;
+  totalHoursFasted: number;
   longestFastHours: number;
-  totalHarvests: number;
-  consistency30Days: number;
-  perfectHarvestsCount: number;
-}
-
-export interface AppSettings {
-  sound: boolean;
-  notifications: boolean;
-  waterGoal: number;
-  theme: 'auto' | 'day' | 'sunset' | 'night';
-  lastGoal: number;
-  reducedMotion: boolean;
-}
-
-export interface AppState {
-  activeFast: ActiveFast | null;
-  history: FastRecord[];
-  water: Record<string, number>; // "YYYY-MM-DD" -> cups
-  settings: AppSettings;
-  unlockedAchievements: string[];
-}
-
-export const RANK_INFO: Record<HunterRank, { title: string; minLevel: number; maxLevel: number; perk: string }> = {
-  E: { title: 'Colono Novato', minLevel: 1, maxLevel: 4, perk: 'Cerca de madeira básica e horta inicial' },
-  D: { title: 'Lavrador', minLevel: 5, maxLevel: 9, perk: 'Caminho de pedra e celeiro rústico' },
-  C: { title: 'Fazendeiro', minLevel: 10, maxLevel: 15, perk: 'Moinho de vento e flores coloridas' },
-  B: { title: 'Mestre da Colheita', minLevel: 16, maxLevel: 22, perk: 'Estufa aconchegante e animais extras' },
-  A: { title: 'Guardião do Vale', minLevel: 23, maxLevel: 29, perk: 'Fonte de pedra e iluminação mágica' },
-  S: { title: 'Lenda do Vale', minLevel: 30, maxLevel: 999, perk: 'Castelo do Vale com aura dourada' },
-};
-
-// Level curve: XP to advance to next level = Math.floor(100 * Math.pow(level, 1.4))
-export function calculateLevelFromXp(totalXp: number): {
-  level: number;
-  currentLevelXp: number;
-  nextLevelXp: number;
-  progressPercent: number;
-} {
-  let level = 1;
-  let accumulatedXp = 0;
-
-  while (true) {
-    const xpNeededForThisLevel = Math.floor(100 * Math.pow(level, 1.4));
-    if (totalXp < accumulatedXp + xpNeededForThisLevel) {
-      const currentLevelXp = totalXp - accumulatedXp;
-      const progressPercent = Math.min(100, Math.max(0, Math.floor((currentLevelXp / xpNeededForThisLevel) * 100)));
-      return {
-        level,
-        currentLevelXp,
-        nextLevelXp: xpNeededForThisLevel,
-        progressPercent,
-      };
-    }
-    accumulatedXp += xpNeededForThisLevel;
-    level++;
-    if (level > 100) {
-      // Safety cap
-      return { level: 100, currentLevelXp: 0, nextLevelXp: 100000, progressPercent: 100 };
-    }
-  }
-}
-
-export function getRankFromLevel(level: number): { rank: HunterRank; title: string } {
-  if (level >= 30) return { rank: 'S', title: RANK_INFO.S.title };
-  if (level >= 23) return { rank: 'A', title: RANK_INFO.A.title };
-  if (level >= 16) return { rank: 'B', title: RANK_INFO.B.title };
-  if (level >= 10) return { rank: 'C', title: RANK_INFO.C.title };
-  if (level >= 5) return { rank: 'D', title: RANK_INFO.D.title };
-  return { rank: 'E', title: RANK_INFO.E.title };
-}
-
-export function getPlantForHours(hours: number): PlantType {
-  if (hours <= 14) return 'carrot';
-  if (hours <= 17) return 'potato';
-  if (hours <= 23) return 'pumpkin';
-  return 'starfruit';
-}
-
-export function getFastingPhase(elapsedHours: number): {
-  phase: number;
-  name: string;
-  tagline: string;
-  desc: string;
-} {
-  if (elapsedHours < 4) {
-    return {
-      phase: 1,
-      name: 'Digestão & Nutrição',
-      tagline: 'O corpo digere a última refeição',
-      desc: 'Os níveis de glicose e insulina no sangue estão no pico digestivo.',
-    };
-  }
-  if (elapsedHours < 8) {
-    return {
-      phase: 2,
-      name: 'Queda de Insulina',
-      tagline: 'Estabilização de glicose',
-      desc: 'A insulina diminui e o corpo passa a queimar o glicogênio estocado no fígado.',
-    };
-  }
-  if (elapsedHours < 12) {
-    return {
-      phase: 3,
-      name: 'Transição Metabólica',
-      tagline: 'Preparando a fornalha',
-      desc: 'O estoque de carboidratos está esgotando. O metabolismo começa a buscar gordura.',
-    };
-  }
-  if (elapsedHours < 16) {
-    return {
-      phase: 4,
-      name: 'Cetose Inicial & Foco',
-      tagline: 'Queima ativa de gordura',
-      desc: 'Corpos cetônicos começam a nutrir o cérebro. Maior clareza mental e energia estável.',
-    };
-  }
-  if (elapsedHours < 24) {
-    return {
-      phase: 5,
-      name: 'Autofagia Celular',
-      tagline: 'Faxina e regeneração celular',
-      desc: 'As células começam a reciclar componentes velhos e danificados. Renovação profunda.',
-    };
-  }
-  return {
-    phase: 6,
-    name: 'Renovação Profunda',
-    tagline: 'Modo sobrevivência lendário',
-    desc: 'O hormônio do crescimento (HGH) sobe e o sistema imunológico entra em regeneração.',
-  };
+  goalSuccessRate: number; // percentage 0-100
+  currentStreakDays: number;
+  averageFastHours: number;
 }

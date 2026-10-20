@@ -1,216 +1,195 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import type { ActiveFast } from '../types';
-import { getPlantForHours, PLANT_CONFIGS } from '../types';
-import { calculateFastReward } from '../storage';
-import { sound } from '../audio';
-import { X, Sparkles, CheckCircle2, AlertCircle, Utensils } from 'lucide-react';
+import { useState } from 'react';
+import type { FC } from 'react';
+import { X, CheckCircle2, Clock, FileText } from 'lucide-react';
+import confetti from 'canvas-confetti';
+import type { Fast } from '../types';
+import { sound } from '../lib/audio';
+import { SlideToConfirm } from './SlideToConfirm';
 
 interface BreakFastModalProps {
   isOpen: boolean;
+  activeFast: Fast | null;
   onClose: () => void;
-  activeFast: ActiveFast;
-  currentStreak: number;
-  onConfirmBreak: (adjustedEndTs: number) => void;
+  onConfirm: (fastId: string, endedAt: string, notes?: string) => Promise<void>;
 }
 
-export const BreakFastModal: React.FC<BreakFastModalProps> = ({
+export const BreakFastModal: FC<BreakFastModalProps> = ({
   isOpen,
-  onClose,
   activeFast,
-  currentStreak,
-  onConfirmBreak,
+  onClose,
+  onConfirm
 }) => {
-  const [endDateTimeStr, setEndDateTimeStr] = useState<string>('');
+  if (!isOpen || !activeFast) return null;
 
-  useEffect(() => {
-    if (!isOpen) return;
+  const getNowLocalDateTime = () => {
     const now = new Date();
-    const localIso = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
-      .toISOString()
-      .slice(0, 16);
-    setEndDateTimeStr(localIso);
-  }, [isOpen]);
-
-  const setAdjustMinutesAgo = (minutesAgo: number) => {
-    sound.playClick();
-    const target = new Date(Date.now() - minutesAgo * 60 * 1000);
-    if (target.getTime() < activeFast.startTs) {
-      target.setTime(activeFast.startTs + 60 * 1000);
-    }
-    const localIso = new Date(target.getTime() - target.getTimezoneOffset() * 60000)
-      .toISOString()
-      .slice(0, 16);
-    setEndDateTimeStr(localIso);
+    const offset = now.getTimezoneOffset() * 60000;
+    const local = new Date(now.getTime() - offset);
+    return local.toISOString().slice(0, 16);
   };
 
-  const metrics = useMemo(() => {
-    const chosenEndTs = new Date(endDateTimeStr).getTime();
-    const safeEndTs = isNaN(chosenEndTs) ? Date.now() : chosenEndTs;
-    const durationMinutes = Math.max(1, Math.floor((safeEndTs - activeFast.startTs) / (1000 * 60)));
-    const durationHours = Math.floor(durationMinutes / 60);
-    const durationMins = durationMinutes % 60;
+  const [endedAtValue, setEndedAtValue] = useState<string>(getNowLocalDateTime);
+  const [notes, setNotes] = useState<string>(activeFast.notes || '');
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [errorMsg, setErrorMsg] = useState<string>('');
 
-    const reward = calculateFastReward(durationMinutes, activeFast.goalHours, currentStreak);
-    const plantType = getPlantForHours(activeFast.goalHours);
-    const plantConfig = PLANT_CONFIGS[plantType];
+  // Cálculo da duração estimada com base no horário de término selecionado
+  const startDate = new Date(activeFast.started_at);
+  const endDate = new Date(endedAtValue);
+  const durationMs = Math.max(0, endDate.getTime() - startDate.getTime());
+  const totalHours = durationMs / 3600000;
+  const h = Math.floor(totalHours);
+  const m = Math.floor((durationMs % 3600000) / 60000);
 
-    return {
-      safeEndTs,
-      durationHours,
-      durationMins,
-      ...reward,
-      plantType,
-      plantConfig,
-    };
-  }, [endDateTimeStr, activeFast, currentStreak]);
+  const isGoalReached = totalHours >= activeFast.goal_hours;
+  const diffHours = (totalHours - activeFast.goal_hours).toFixed(1);
 
-  if (!isOpen) return null;
+  const handleExecuteBreak = async () => {
+    if (endDate.getTime() < startDate.getTime()) {
+      setErrorMsg('O horário de término não pode ser anterior ao início do jejum.');
+      return;
+    }
+
+    try {
+      setIsSubmitting(true);
+      setErrorMsg('');
+
+      // Se a meta foi batida, dispara celebração discreta (paleta esmeralda / neutra)
+      if (isGoalReached) {
+        sound.playCompleteFast();
+        try {
+          confetti({
+            particleCount: 40,
+            spread: 60,
+            origin: { y: 0.65 },
+            colors: ['#10B981', '#059669', '#34D399', '#F8FAFC']
+          });
+        } catch {
+          // Ignora
+        }
+      } else {
+        sound.playClick();
+      }
+
+      await onConfirm(activeFast.id, endDate.toISOString(), notes);
+      onClose();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Falha ao quebrar jejum.';
+      setErrorMsg(msg);
+      setIsSubmitting(false);
+    }
+  };
 
   return (
-    <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="break-fast-title">
-      <div className="modal-content p-6">
-        {/* Header */}
-        <div className="flex items-center justify-between pb-3 border-b border-subtle">
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal-dialog"
+        onClick={e => e.stopPropagation()}
+        style={{ padding: '1.5rem' }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem' }}>
           <div>
-            <h2 id="break-fast-title" className="text-base font-bold font-heading text-primary flex items-center gap-2">
-              <Utensils className="w-4 h-4 text-pumpkin" />
-              <span>Concluir Jejum & Colheita</span>
+            <h2 style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+              Quebrar Jejum
             </h2>
-            <p className="text-xs text-secondary mt-0.5">
-              Revise o resumo da jornada e confirme a quebra do jejum
+            <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
+              Confirme o encerramento e registre o horário da sua refeição
             </p>
           </div>
           <button
-            type="button"
-            onClick={onClose}
-            className="btn-icon"
-            aria-label="Fechar janela"
+            onClick={() => { sound.playClick(); onClose(); }}
+            className="btn btn-ghost"
+            style={{ padding: '0.35rem', borderRadius: '50%' }}
+            aria-label="Fechar"
           >
-            <X className="w-4 h-4" />
+            <X size={18} />
           </button>
         </div>
 
-        {/* Ajuste do Horário da Refeição */}
-        <div className="my-4">
-          <label className="block text-xs font-semibold text-primary mb-2">
-            Horário Real da Refeição:
-          </label>
-          <div className="flex flex-wrap gap-1.5 mb-2.5">
-            <button
-              type="button"
-              onClick={() => setAdjustMinutesAgo(0)}
-              className="btn-secondary py-1 px-3 text-xs"
-            >
-              Agora
-            </button>
-            <button
-              type="button"
-              onClick={() => setAdjustMinutesAgo(15)}
-              className="btn-secondary py-1 px-3 text-xs"
-            >
-              -15 min
-            </button>
-            <button
-              type="button"
-              onClick={() => setAdjustMinutesAgo(30)}
-              className="btn-secondary py-1 px-3 text-xs"
-            >
-              -30 min
-            </button>
-            <button
-              type="button"
-              onClick={() => setAdjustMinutesAgo(60)}
-              className="btn-secondary py-1 px-3 text-xs"
-            >
-              -1h
-            </button>
+        {errorMsg && (
+          <div
+            style={{
+              padding: '0.625rem 0.875rem',
+              backgroundColor: 'var(--danger-bg)',
+              border: '1px solid var(--danger-border)',
+              borderRadius: 'var(--radius-md)',
+              color: 'var(--danger-text)',
+              fontSize: '0.8125rem',
+              marginBottom: '1rem'
+            }}
+          >
+            {errorMsg}
           </div>
+        )}
+
+        {/* Resumo do Jejum */}
+        <div className="ui-card-subtle" style={{ padding: '1rem', marginBottom: '1.25rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+            <span style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)' }}>
+              DURAÇÃO TOTAL
+            </span>
+            <span className={`badge ${isGoalReached ? 'badge-emerald' : 'badge-muted'}`}>
+              {isGoalReached ? <CheckCircle2 size={12} /> : null}
+              {isGoalReached ? 'Meta alcançada!' : 'Meta parcial'}
+            </span>
+          </div>
+
+          <div className="tabular-nums" style={{ fontSize: '1.75rem', fontWeight: 800, color: 'var(--text-primary)' }}>
+            {h}h {m}min
+          </div>
+
+          <div style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+            Meta estipulada: <strong>{activeFast.goal_hours}h</strong>
+            {isGoalReached ? (
+              <span style={{ color: 'var(--emerald-600)', marginLeft: '0.4rem' }}>
+                (+{diffHours}h acima da meta)
+              </span>
+            ) : (
+              <span style={{ color: 'var(--text-muted)', marginLeft: '0.4rem' }}>
+                (faltaram {Math.abs(parseFloat(diffHours))}h)
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Ajuste do horário de término real */}
+        <div style={{ marginBottom: '1.25rem' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>
+            <Clock size={15} />
+            Horário da Primeira Garfada / Refeição
+          </label>
           <input
             type="datetime-local"
-            value={endDateTimeStr}
-            onChange={(e) => setEndDateTimeStr(e.target.value)}
-            className="w-full rounded-md px-3 py-2 text-sm font-mono text-primary"
-            style={{ background: 'var(--bg-surface-subtle)', border: '1px solid var(--border-medium)', color: 'var(--text-primary)' }}
+            className="input-field"
+            value={endedAtValue}
+            onChange={e => setEndedAtValue(e.target.value)}
           />
         </div>
 
-        {/* Card de Resumo */}
-        <div className="bg-surface-subtle border border-subtle rounded-md p-4 mb-5">
-          <div className="flex items-center justify-between pb-3 border-b border-subtle mb-3">
-            <div>
-              <div className="text-xs font-bold text-primary">
-                {metrics.plantConfig.name}
-              </div>
-              <div
-                className={`text-xs font-medium flex items-center gap-1.5 mt-0.5 ${
-                  metrics.completedGoal ? 'text-sage' : 'text-pumpkin'
-                }`}
-              >
-                {metrics.completedGoal ? (
-                  <>
-                    <CheckCircle2 className="w-4 h-4 text-sage" />
-                    <span>Meta Concluída (Colheita Perfeita)!</span>
-                  </>
-                ) : (
-                  <>
-                    <AlertCircle className="w-4 h-4 text-pumpkin" />
-                    <span>Colheita Parcial (antes da meta)</span>
-                  </>
-                )}
-              </div>
-            </div>
-
-            <div className="text-right">
-              <span className="font-mono text-lg font-bold text-sage">
-                +{metrics.xpEarned} XP
-              </span>
-            </div>
-          </div>
-
-          {/* Discriminação de XP */}
-          <div className="space-y-1.5 text-xs text-secondary font-medium">
-            <div className="flex justify-between">
-              <span>Duração Total:</span>
-              <span className="font-mono text-primary">
-                {metrics.durationHours}h {metrics.durationMins}min / {activeFast.goalHours}h
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span>XP Base ({metrics.durationHours}h):</span>
-              <span>+{metrics.baseXp} XP</span>
-            </div>
-            {metrics.goalBonusXp > 0 && (
-              <div className="flex justify-between text-sage">
-                <span>Bônus de Meta (+50%):</span>
-                <span>+{metrics.goalBonusXp} XP</span>
-              </div>
-            )}
-            {metrics.streakBonusXp > 0 && (
-              <div className="flex justify-between text-pumpkin">
-                <span>Bônus de Sequência ({currentStreak} dias):</span>
-                <span>+{metrics.streakBonusXp} XP</span>
-              </div>
-            )}
-          </div>
+        {/* Anotações da quebra de jejum */}
+        <div style={{ marginBottom: '1.5rem' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8125rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '0.4rem' }}>
+            <FileText size={15} />
+            Notas sobre a refeição ou como se sentiu (opcional)
+          </label>
+          <input
+            type="text"
+            className="input-field"
+            placeholder="Ex: Almoço rico em proteínas e gorduras boas, muita disposição"
+            value={notes}
+            onChange={e => setNotes(e.target.value)}
+            maxLength={150}
+          />
         </div>
 
-        {/* Ações */}
-        <div className="flex gap-2.5">
-          <button
-            type="button"
-            onClick={onClose}
-            className="btn-secondary flex-1 py-2 text-xs"
-          >
-            Voltar
-          </button>
-          <button
-            type="button"
-            onClick={() => onConfirmBreak(metrics.safeEndTs)}
-            className="btn-primary flex-1 py-2 text-xs flex items-center justify-center gap-1.5"
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>Confirmar & Salvar</span>
-          </button>
+        {/* Slide para confirmar (Bencho style) */}
+        <div>
+          <SlideToConfirm
+            label="Deslize para quebrar o jejum"
+            confirmedLabel="Quebrando jejum..."
+            onConfirm={handleExecuteBreak}
+            disabled={isSubmitting}
+          />
         </div>
       </div>
     </div>

@@ -1,183 +1,176 @@
-import React, { useState, useMemo, useRef } from 'react';
-import type { AppState, FastRecord } from '../types';
-import { PLANT_CONFIGS } from '../types';
-import { exportBackup, importBackup, calculateFastReward } from '../storage';
-import { sound } from '../audio';
-import { Download, Upload, Trash2, Edit3, BarChart3, AlertTriangle, X, Check } from 'lucide-react';
+import { useState, useMemo } from 'react';
+import type { FC } from 'react';
+import { Search, Calendar, Edit3, Trash2, Clock } from 'lucide-react';
+import type { Fast } from '../types';
+import { sound } from '../lib/audio';
 
 interface HistoryTabProps {
-  state: AppState;
-  onUpdateHistory: (newHistory: FastRecord[]) => void;
-  onRestoreState: (newState: AppState) => void;
-  onResetProgress: () => void;
+  history: Fast[];
+  onEditFast: (fast: Fast) => void;
+  onDeleteFast: (fastId: string) => void;
 }
 
-export const HistoryTab: React.FC<HistoryTabProps> = ({
-  state,
-  onUpdateHistory,
-  onRestoreState,
-  onResetProgress,
+export const HistoryTab: FC<HistoryTabProps> = ({
+  history,
+  onEditFast,
+  onDeleteFast
 }) => {
-  const [editingRecord, setEditingRecord] = useState<FastRecord | null>(null);
-  const [editStartStr, setEditStartStr] = useState<string>('');
-  const [editEndStr, setEditEndStr] = useState<string>('');
-  const [editGoalHours, setEditGoalHours] = useState<number>(16);
+  const [chartRange, setChartRange] = useState<'7d' | '30d'>('7d');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterType, setFilterType] = useState<'all' | 'achieved' | 'partial'>('all');
 
-  const [resetConfirmCount, setResetConfirmCount] = useState<number>(0);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  // Past 14 days chart data
-  const chartDays = useMemo(() => {
-    const days: { dateStr: string; label: string; totalHours: number }[] = [];
+  // Cálculos para o gráfico de barras
+  const chartDaysCount = chartRange === '7d' ? 7 : 30;
+  
+  const dailyData = useMemo(() => {
+    const days: { label: string; dateStr: string; hours: number; isGoalMet: boolean }[] = [];
     const now = new Date();
 
-    for (let i = 13; i >= 0; i--) {
-      const d = new Date(now);
-      d.setDate(d.getDate() - i);
-      const year = d.getFullYear();
-      const month = String(d.getMonth() + 1).padStart(2, '0');
-      const day = String(d.getDate()).padStart(2, '0');
-      const dateStr = `${year}-${month}-${day}`;
-      const weekday = d.toLocaleDateString('pt-BR', { weekday: 'narrow' });
+    for (let i = chartDaysCount - 1; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+      const dateStr = d.toISOString().slice(0, 10);
+      const label = d.toLocaleDateString('pt-BR', { weekday: 'short', day: 'numeric' });
 
-      const dayStart = new Date(d);
-      dayStart.setHours(0, 0, 0, 0);
-      const dayEnd = new Date(d);
-      dayEnd.setHours(23, 59, 59, 999);
+      // Soma de horas de jejuns que iniciaram ou terminaram neste dia
+      let totalH = 0;
+      let metGoal = false;
 
-      let totalMins = 0;
-      state.history.forEach((rec) => {
-        if (rec.endTs >= dayStart.getTime() && rec.endTs <= dayEnd.getTime()) {
-          totalMins += rec.durationMinutes;
+      history.forEach(fast => {
+        if (!fast.ended_at) return;
+        const fastStart = fast.started_at.slice(0, 10);
+        const fastEnd = fast.ended_at.slice(0, 10);
+
+        if (fastStart === dateStr || fastEnd === dateStr) {
+          const durationH = (new Date(fast.ended_at).getTime() - new Date(fast.started_at).getTime()) / 3600000;
+          totalH += durationH;
+          if (durationH >= fast.goal_hours) metGoal = true;
         }
       });
 
-      days.push({
-        dateStr,
-        label: `${weekday} ${day}`,
-        totalHours: Math.round((totalMins / 60) * 10) / 10,
-      });
+      days.push({ label, dateStr, hours: totalH, isGoalMet: metGoal });
     }
-
     return days;
-  }, [state.history]);
+  }, [history, chartDaysCount]);
 
-  const maxChartHours = Math.max(16, ...chartDays.map((d) => d.totalHours));
+  const maxChartHours = Math.max(24, ...dailyData.map(d => d.hours));
 
-  const handleStartEdit = (record: FastRecord) => {
-    sound.playClick();
-    setEditingRecord(record);
-    const dStart = new Date(record.startTs);
-    const dEnd = new Date(record.endTs);
-    setEditStartStr(new Date(dStart.getTime() - dStart.getTimezoneOffset() * 60000).toISOString().slice(0, 16));
-    setEditEndStr(new Date(dEnd.getTime() - dEnd.getTimezoneOffset() * 60000).toISOString().slice(0, 16));
-    setEditGoalHours(record.goalHours);
-  };
+  // Mapa de calor (Heatmap - 28 dias em 4 semanas)
+  const heatmapDays = useMemo(() => {
+    const cells: { dateStr: string; hours: number; level: number }[] = [];
+    const now = new Date();
 
-  const handleSaveEdit = () => {
-    if (!editingRecord) return;
-    const startTs = new Date(editStartStr).getTime();
-    const endTs = new Date(editEndStr).getTime();
+    for (let i = 27; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+      const dateStr = d.toISOString().slice(0, 10);
 
-    if (isNaN(startTs) || isNaN(endTs) || endTs <= startTs) {
-      alert('Data/hora final deve ser posterior à data/hora inicial.');
-      return;
+      let h = 0;
+      history.forEach(fast => {
+        if (!fast.ended_at) return;
+        if (fast.started_at.slice(0, 10) === dateStr) {
+          h += (new Date(fast.ended_at).getTime() - new Date(fast.started_at).getTime()) / 3600000;
+        }
+      });
+
+      let level = 0;
+      if (h > 0 && h < 12) level = 1;
+      else if (h >= 12 && h < 16) level = 2;
+      else if (h >= 16 && h < 20) level = 3;
+      else if (h >= 20) level = 4;
+
+      cells.push({ dateStr, hours: h, level });
     }
+    return cells;
+  }, [history]);
 
-    const durationMinutes = Math.max(1, Math.floor((endTs - startTs) / (1000 * 60)));
-    const reward = calculateFastReward(durationMinutes, editGoalHours, 0);
+  // Filtros da lista
+  const filteredHistory = useMemo(() => {
+    return history.filter(fast => {
+      if (!fast.ended_at) return false;
+      const durationHours = (new Date(fast.ended_at).getTime() - new Date(fast.started_at).getTime()) / 3600000;
+      const isAchieved = durationHours >= fast.goal_hours;
 
-    const updated = state.history.map((r) => {
-      if (r.id === editingRecord.id) {
-        return {
-          ...r,
-          startTs,
-          endTs,
-          goalHours: editGoalHours,
-          durationMinutes,
-          completedGoal: reward.completedGoal,
-          xpEarned: reward.xpEarned,
-          harvestQuality: reward.harvestQuality,
-        };
+      if (filterType === 'achieved' && !isAchieved) return false;
+      if (filterType === 'partial' && isAchieved) return false;
+
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        const dateStr = new Date(fast.started_at).toLocaleDateString('pt-BR');
+        const notesMatch = fast.notes?.toLowerCase().includes(q) || false;
+        return dateStr.includes(q) || notesMatch;
       }
-      return r;
+
+      return true;
     });
-
-    sound.playConfirmSound();
-    onUpdateHistory(updated);
-    setEditingRecord(null);
-  };
-
-  const handleDeleteRecord = (id: string) => {
-    sound.playClick();
-    if (confirm('Tem certeza que deseja excluir este registro de jejum? O progresso será recalculado com consistência.')) {
-      const updated = state.history.filter((r) => r.id !== id);
-      onUpdateHistory(updated);
-    }
-  };
-
-  const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    importBackup(
-      file,
-      (importedState) => {
-        sound.playHarvest();
-        alert('Backup importado com sucesso!');
-        onRestoreState(importedState);
-      },
-      (msg) => {
-        alert(msg);
-      }
-    );
-  };
+  }, [history, filterType, searchQuery]);
 
   return (
-    <div className="space-y-6">
-      {/* 14-Day Chart Card */}
-      <div className="cozy-card p-6">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2">
-            <BarChart3 className="w-5 h-5 text-[var(--accent-sage)]" />
-            <div>
-              <h3 className="text-base font-bold font-heading text-[var(--text-primary)]">
-                Horas em Jejum por Dia
-              </h3>
-              <p className="text-xs text-[var(--text-secondary)]">
-                Acompanhamento das suas últimas 2 semanas de disciplina
-              </p>
-            </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+      {/* GRÁFICO DE HORAS JEJUADAS */}
+      <div className="ui-card">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem' }}>
+          <div>
+            <h3 style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+              Evolução Temporal
+            </h3>
+            <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
+              Horas de jejum registradas por dia
+            </p>
           </div>
-          <span className="font-mono text-xs text-[var(--text-tertiary)]">
-            Escala máxima: <b className="text-[var(--accent-sage)]">{maxChartHours}h</b>
-          </span>
+
+          <div className="tabs-container">
+            <button
+              className={`tab-btn ${chartRange === '7d' ? 'active' : ''}`}
+              onClick={() => { sound.playClick(); setChartRange('7d'); }}
+              style={{ padding: '0.35rem 0.65rem' }}
+            >
+              7 dias
+            </button>
+            <button
+              className={`tab-btn ${chartRange === '30d' ? 'active' : ''}`}
+              onClick={() => { sound.playClick(); setChartRange('30d'); }}
+              style={{ padding: '0.35rem 0.65rem' }}
+            >
+              30 dias
+            </button>
+          </div>
         </div>
 
-        {/* Modern Bar Chart Container */}
-        <div className="h-44 flex items-end gap-1.5 sm:gap-2.5 pt-4 pb-2 px-1 border-b border-[var(--border-subtle)]">
-          {chartDays.map((d, i) => {
-            const heightPercent = maxChartHours > 0 ? Math.min(100, (d.totalHours / maxChartHours) * 100) : 0;
-            const isToday = i === chartDays.length - 1;
-
+        {/* Barras do Gráfico */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'flex-end',
+            gap: chartRange === '7d' ? '1rem' : '0.25rem',
+            height: '160px',
+            paddingTop: '1rem',
+            borderBottom: '1px solid var(--border-subtle)'
+          }}
+        >
+          {dailyData.map((d, idx) => {
+            const heightPercent = maxChartHours > 0 ? (d.hours / maxChartHours) * 100 : 0;
             return (
-              <div key={d.dateStr} className="flex-1 flex flex-col items-center h-full justify-end group relative">
-                {/* Modern Hover Tooltip */}
-                <div className="absolute -top-10 hidden group-hover:flex flex-col items-center bg-[var(--bg-surface-raised)] text-[var(--text-primary)] text-xs font-mono px-2 py-1 rounded-md border border-[var(--border-subtle)] shadow-xl z-20 pointer-events-none whitespace-nowrap">
-                  <span>{d.totalHours}h</span>
-                  <span className="text-[11px] text-[var(--text-tertiary)]">{d.dateStr}</span>
-                </div>
-
-                {/* Animated Rounded Bar */}
+              <div
+                key={idx}
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  height: '100%',
+                  justifyContent: 'flex-end',
+                  position: 'relative'
+                }}
+                title={`${d.label}: ${d.hours.toFixed(1)}h`}
+              >
+                {/* Barra */}
                 <div
-                  className={`w-full rounded-t-md transition-all duration-300 ${
-                    d.totalHours >= 16
-                      ? 'bg-[var(--accent-sage)]'
-                      : d.totalHours > 0
-                      ? 'bg-[var(--accent-pumpkin)]'
-                      : 'bg-[var(--bg-surface-raised)]'
-                  } ${isToday ? 'ring-1 ring-[var(--accent-sage)]' : ''}`}
                   style={{
-                    height: `${Math.max(d.totalHours > 0 ? 8 : 4, heightPercent)}%`,
+                    width: '100%',
+                    maxWidth: chartRange === '7d' ? '36px' : '14px',
+                    height: `${Math.max(d.hours > 0 ? 4 : 0, heightPercent)}%`,
+                    backgroundColor: d.hours >= 16 ? 'var(--emerald-500)' : d.hours > 0 ? 'var(--emerald-700)' : 'var(--bg-surface-subtle)',
+                    borderRadius: '4px 4px 0 0',
+                    transition: 'height 0.4s ease'
                   }}
                 />
               </div>
@@ -185,145 +178,206 @@ export const HistoryTab: React.FC<HistoryTabProps> = ({
           })}
         </div>
 
-        {/* Labels under chart */}
-        <div className="flex justify-between text-xs font-mono text-[var(--text-tertiary)] mt-2 px-1">
-          <span>Há 14 dias</span>
+        {/* Labels inferiores do gráfico */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.5rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+          <span>{dailyData[0]?.label}</span>
+          <span>{dailyData[Math.floor(dailyData.length / 2)]?.label}</span>
           <span>Hoje</span>
         </div>
       </div>
 
-      {/* Backup and Data Management */}
-      <div className="cozy-card p-6 flex flex-col sm:flex-row items-center justify-between gap-4">
-        <div>
-          <h4 className="text-sm font-bold text-[var(--text-primary)]">
-            Exportação e Segurança de Dados
-          </h4>
-          <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-            Seus dados ficam salvos localmente. Baixe uma cópia JSON para levar para outro dispositivo.
+      {/* MAPA DE CALOR (BENCHO HEATMAP MATRIX) */}
+      <div className="ui-card">
+        <div style={{ marginBottom: '1rem' }}>
+          <h3 style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+            Consistência (Últimos 28 dias)
+          </h3>
+          <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
+            Matriz de densidade diária de jejuns
           </p>
         </div>
 
-        <div className="flex gap-2.5 w-full sm:w-auto">
-          <button
-            type="button"
-            onClick={() => {
-              sound.playClick();
-              exportBackup(state);
-            }}
-            className="btn-secondary flex-1 sm:flex-none py-2 text-xs font-semibold flex items-center justify-center gap-1.5"
-          >
-            <Download className="w-4 h-4 text-[var(--accent-sage)]" />
-            <span>Exportar JSON</span>
-          </button>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '0.4rem', maxWidth: '360px' }}>
+          {heatmapDays.map((cell, idx) => {
+            const colors = [
+              'var(--bg-surface-subtle)',
+              'rgba(16, 185, 129, 0.25)',
+              'rgba(16, 185, 129, 0.50)',
+              'rgba(16, 185, 129, 0.75)',
+              'var(--emerald-500)'
+            ];
 
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".json"
-            onChange={handleImportFile}
-            className="hidden"
-          />
-          <button
-            type="button"
-            onClick={() => {
-              sound.playClick();
-              fileInputRef.current?.click();
-            }}
-            className="btn-secondary flex-1 sm:flex-none py-2 text-xs font-semibold flex items-center justify-center gap-1.5"
-          >
-            <Upload className="w-4 h-4 text-[var(--accent-petrol)]" />
-            <span>Importar Backup</span>
-          </button>
+            return (
+              <div
+                key={idx}
+                style={{
+                  aspectRatio: '1',
+                  borderRadius: '4px',
+                  backgroundColor: colors[cell.level],
+                  border: '1px solid var(--border-subtle)',
+                  cursor: 'pointer'
+                }}
+                title={`${new Date(cell.dateStr + 'T12:00:00').toLocaleDateString('pt-BR')}: ${cell.hours.toFixed(1)}h jejuadas`}
+              />
+            );
+          })}
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.75rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+          <span>Menos</span>
+          <div style={{ display: 'flex', gap: '3px' }}>
+            <span style={{ width: 10, height: 10, borderRadius: 2, background: 'var(--bg-surface-subtle)' }} />
+            <span style={{ width: 10, height: 10, borderRadius: 2, background: 'rgba(16, 185, 129, 0.3)' }} />
+            <span style={{ width: 10, height: 10, borderRadius: 2, background: 'rgba(16, 185, 129, 0.6)' }} />
+            <span style={{ width: 10, height: 10, borderRadius: 2, background: 'var(--emerald-500)' }} />
+          </div>
+          <span>Mais</span>
         </div>
       </div>
 
-      {/* History Table List */}
-      <div className="cozy-card p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-base font-bold font-heading text-[var(--text-primary)]">
-            Histórico de Sessões ({state.history.length})
-          </h3>
-          <span className="text-xs text-[var(--text-tertiary)]">
-            Clique no ícone de lápis para corrigir horários passados
-          </span>
+      {/* LISTAGEM DE HISTÓRICO COM BUSCA E FILTROS */}
+      <div className="ui-card">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginBottom: '1.25rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
+            <div>
+              <h3 style={{ fontSize: '1.125rem', fontWeight: 700, color: 'var(--text-primary)' }}>
+                Registros Anteriores ({filteredHistory.length})
+              </h3>
+              <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>
+                Gerencie, altere ou exclua qualquer registro passado
+              </p>
+            </div>
+
+            {/* Filtros rápidos */}
+            <div className="tabs-container">
+              <button
+                className={`tab-btn ${filterType === 'all' ? 'active' : ''}`}
+                onClick={() => { sound.playClick(); setFilterType('all'); }}
+                style={{ padding: '0.35rem 0.65rem' }}
+              >
+                Todos
+              </button>
+              <button
+                className={`tab-btn ${filterType === 'achieved' ? 'active' : ''}`}
+                onClick={() => { sound.playClick(); setFilterType('achieved'); }}
+                style={{ padding: '0.35rem 0.65rem' }}
+              >
+                Metas Batidas
+              </button>
+              <button
+                className={`tab-btn ${filterType === 'partial' ? 'active' : ''}`}
+                onClick={() => { sound.playClick(); setFilterType('partial'); }}
+                style={{ padding: '0.35rem 0.65rem' }}
+              >
+                Parciais
+              </button>
+            </div>
+          </div>
+
+          {/* Barra de Busca */}
+          <div style={{ position: 'relative' }}>
+            <Search size={16} style={{ position: 'absolute', left: '0.875rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+            <input
+              type="text"
+              className="input-field"
+              placeholder="Buscar por data ou notas..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              style={{ paddingLeft: '2.5rem' }}
+            />
+          </div>
         </div>
 
-        {state.history.length === 0 ? (
-          <div className="text-center py-12 text-[var(--text-secondary)]">
-            <p className="text-sm font-medium">Nenhum jejum concluído ainda.</p>
-            <p className="text-xs text-[var(--text-tertiary)] mt-1">
-              Inicie e finalize sua primeira sessão para ver seu registro detalhado aqui.
-            </p>
+        {/* Lista de Itens */}
+        {filteredHistory.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '3rem 1rem', color: 'var(--text-muted)' }}>
+            <Calendar size={32} style={{ margin: '0 auto 0.75rem auto', opacity: 0.5 }} />
+            <p style={{ fontSize: '0.9375rem', fontWeight: 600 }}>Nenhum registro encontrado</p>
+            <p style={{ fontSize: '0.8125rem' }}>Quando você concluir seu primeiro jejum, ele aparecerá aqui.</p>
           </div>
         ) : (
-          <div className="space-y-3">
-            {[...state.history].reverse().map((rec) => {
-              const plantConf = PLANT_CONFIGS[rec.plant] || PLANT_CONFIGS.carrot;
-              const dStart = new Date(rec.startTs);
-              const dEnd = new Date(rec.endTs);
-              const durationHours = Math.floor(rec.durationMinutes / 60);
-              const durationMins = rec.durationMinutes % 60;
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.625rem' }}>
+            {filteredHistory.map(fast => {
+              const start = new Date(fast.started_at);
+              const end = fast.ended_at ? new Date(fast.ended_at) : new Date();
+              const durationMs = Math.max(0, end.getTime() - start.getTime());
+              const durationH = durationMs / 3600000;
+              const h = Math.floor(durationH);
+              const m = Math.floor((durationMs % 3600000) / 60000);
+              const isGoalMet = durationH >= fast.goal_hours;
 
               return (
                 <div
-                  key={rec.id}
-                  className="bg-[var(--bg-surface-raised)] border border-[var(--border-subtle)] rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:border-[var(--border-medium)] transition-colors"
+                  key={fast.id}
+                  className="ui-card-subtle"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '0.875rem 1rem',
+                    gap: '1rem',
+                    flexWrap: 'wrap'
+                  }}
                 >
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-[var(--bg-surface-subtle)] border border-[var(--border-subtle)] flex items-center justify-center text-xl flex-shrink-0">
-                      {rec.plant === 'carrot' ? '🥕' : rec.plant === 'potato' ? '🥔' : rec.plant === 'pumpkin' ? '🎃' : '⭐'}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.875rem' }}>
+                    <div
+                      style={{
+                        width: '36px',
+                        height: '36px',
+                        borderRadius: 'var(--radius-sm)',
+                        backgroundColor: isGoalMet ? 'var(--emerald-50)' : 'var(--bg-surface)',
+                        color: isGoalMet ? 'var(--emerald-600)' : 'var(--text-muted)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        border: '1px solid var(--border-subtle)',
+                        flexShrink: 0
+                      }}
+                    >
+                      <Clock size={18} />
                     </div>
 
                     <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-bold text-[var(--text-primary)]">
-                          {plantConf.name}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <span className="tabular-nums" style={{ fontSize: '1.0625rem', fontWeight: 800, color: 'var(--text-primary)' }}>
+                          {h}h {m}min
                         </span>
-                        <span
-                          className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${
-                            rec.completedGoal
-                              ? 'bg-[var(--accent-sage-subtle)] text-[var(--accent-sage)] border-[var(--accent-sage-border)]'
-                              : 'bg-[var(--accent-pumpkin-subtle)] text-[var(--accent-pumpkin)] border-[var(--accent-pumpkin-border)]'
-                          }`}
-                        >
-                          {rec.completedGoal ? 'Meta Batida' : 'Parcial'}
+                        <span className={`badge ${isGoalMet ? 'badge-emerald' : 'badge-muted'}`}>
+                          {isGoalMet ? 'Meta de ' + fast.goal_hours + 'h batida' : 'Meta: ' + fast.goal_hours + 'h'}
                         </span>
                       </div>
 
-                      <div className="text-xs text-[var(--text-secondary)] mt-0.5 font-mono">
-                        {dStart.toLocaleDateString('pt-BR')} das {dStart.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} às {dEnd.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+                      <div style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginTop: '0.2rem' }}>
+                        {start.toLocaleDateString('pt-BR')} • {start.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} até {end.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
                       </div>
+
+                      {fast.notes && (
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.2rem', fontStyle: 'italic' }}>
+                          "{fast.notes}"
+                        </div>
+                      )}
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between sm:justify-end gap-4 border-t sm:border-t-0 pt-2 sm:pt-0 border-[var(--border-subtle)]">
-                    <div className="text-left sm:text-right">
-                      <div className="font-mono text-sm font-bold text-[var(--text-primary)]">
-                        {durationHours}h {durationMins}m <span className="text-xs text-[var(--text-tertiary)]">/ {rec.goalHours}h</span>
-                      </div>
-                      <div className="font-mono text-xs text-[var(--accent-sage)] font-bold">
-                        +{rec.xpEarned} XP
-                      </div>
-                    </div>
-
-                    <div className="flex gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => handleStartEdit(rec)}
-                        className="p-2 rounded-lg bg-[var(--bg-surface-subtle)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-medium)] border border-[var(--border-subtle)] transition-colors"
-                        title="Editar horário deste registro"
-                      >
-                        <Edit3 className="w-4 h-4" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteRecord(rec.id)}
-                        className="p-2 rounded-lg bg-[var(--bg-surface-subtle)] text-[var(--text-tertiary)] hover:text-[var(--accent-danger)] border border-[var(--border-subtle)] transition-colors"
-                        title="Excluir registro"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
+                  {/* Ações: Editar e Excluir */}
+                  <div style={{ display: 'flex', gap: '0.35rem', marginLeft: 'auto' }}>
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => { sound.playClick(); onEditFast(fast); }}
+                      style={{ padding: '0.4rem 0.65rem', fontSize: '0.75rem' }}
+                      title="Editar registro"
+                    >
+                      <Edit3 size={14} />
+                      <span>Editar</span>
+                    </button>
+                    <button
+                      className="btn btn-danger"
+                      onClick={() => { sound.playClick(); onDeleteFast(fast.id); }}
+                      style={{ padding: '0.4rem 0.65rem', fontSize: '0.75rem' }}
+                      title="Excluir registro"
+                    >
+                      <Trash2 size={14} />
+                    </button>
                   </div>
                 </div>
               );
@@ -331,127 +385,6 @@ export const HistoryTab: React.FC<HistoryTabProps> = ({
           </div>
         )}
       </div>
-
-      {/* Danger Zone: Reset Progress */}
-      <div className="p-4 rounded-xl border border-[var(--accent-danger)]/30 bg-[var(--accent-danger-subtle)] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div>
-          <h4 className="text-xs font-bold text-[#E57368] flex items-center gap-1.5">
-            <AlertTriangle className="w-4 h-4" />
-            <span>Zona Crítica: Reiniciar Dados</span>
-          </h4>
-          <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-            Apaga todo o histórico, atributos e safras guardadas neste navegador.
-          </p>
-        </div>
-
-        {resetConfirmCount === 0 ? (
-          <button
-            type="button"
-            onClick={() => setResetConfirmCount(1)}
-            className="btn-danger-subtle text-xs"
-          >
-            Resetar Progresso
-          </button>
-        ) : (
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => setResetConfirmCount(0)}
-              className="btn-secondary py-1 px-3 text-xs"
-            >
-              Cancelar
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onResetProgress();
-                setResetConfirmCount(0);
-              }}
-              className="btn-danger-subtle py-1 px-3 text-xs bg-[#c04d3f] text-white"
-            >
-              Confirmar Exclusão
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Edit Modal */}
-      {editingRecord && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Editar Registro">
-          <div className="modal-content p-6">
-            <div className="flex items-center justify-between pb-3 border-b border-[var(--border-subtle)] mb-4">
-              <h3 className="text-base font-bold font-heading text-[var(--text-primary)]">
-                Editar Registro de Jejum
-              </h3>
-              <button
-                type="button"
-                onClick={() => setEditingRecord(null)}
-                className="w-8 h-8 rounded-lg flex items-center justify-center text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="space-y-3 mb-5">
-              <div>
-                <label className="block text-xs font-semibold text-[var(--text-secondary)] mb-1">
-                  Horário de Início:
-                </label>
-                <input
-                  type="datetime-local"
-                  value={editStartStr}
-                  onChange={(e) => setEditStartStr(e.target.value)}
-                  className="w-full bg-[var(--bg-surface-raised)] border border-[var(--border-medium)] rounded-xl px-3 py-2 text-sm text-[var(--text-primary)] font-mono"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[var(--text-secondary)] mb-1">
-                  Horário de Fim:
-                </label>
-                <input
-                  type="datetime-local"
-                  value={editEndStr}
-                  onChange={(e) => setEditEndStr(e.target.value)}
-                  className="w-full bg-[var(--bg-surface-raised)] border border-[var(--border-medium)] rounded-xl px-3 py-2 text-sm text-[var(--text-primary)] font-mono"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-[var(--text-secondary)] mb-1">
-                  Meta em Horas:
-                </label>
-                <input
-                  type="number"
-                  min="1"
-                  max="168"
-                  value={editGoalHours}
-                  onChange={(e) => setEditGoalHours(Number(e.target.value))}
-                  className="w-full bg-[var(--bg-surface-raised)] border border-[var(--border-medium)] rounded-xl px-3 py-2 text-sm text-[var(--text-primary)] font-mono"
-                />
-              </div>
-            </div>
-
-            <div className="flex gap-3">
-              <button
-                type="button"
-                onClick={() => setEditingRecord(null)}
-                className="btn-secondary flex-1 py-2 text-xs"
-              >
-                Cancelar
-              </button>
-              <button
-                type="button"
-                onClick={handleSaveEdit}
-                className="btn-primary flex-1 py-2 text-xs flex items-center justify-center gap-1.5"
-              >
-                <Check className="w-4 h-4" />
-                <span>Salvar Alterações</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
